@@ -386,10 +386,6 @@ def emit_c_struct(periph, opts = {})
     base = periph[:base]
     sname = periph[:struct_name]
     
-    puts "\n//" + "*"*78
-    puts "// #{periph[:name]} struct definition"
-    puts "//" + "*"*78
-    
     puts "typedef struct {"
     emit_c_struct_members("\t", base, base, periph[:reglist], opts)
     puts "} %s_struct;" % [sname]
@@ -415,10 +411,6 @@ def print_regs(periph)
         return
     end
     
-    puts "\n//" + "*"*78
-    puts "// #{periph[:name]} registers"
-    puts "//" + "*"*78
-    
     base = periph[:base]
     periph[:regs_by_name].each {|regname, reg|
         if(reg[:access] != :none)
@@ -433,10 +425,6 @@ def print_vals(periph)
     if(!periph[:output].include? :fields)
         return
     end
-    
-    puts "\n//" + "*"*78
-    puts "// #{periph[:name]} bitdefs"
-    puts "//" + "*"*78
     
     periph[:regs_by_name].each {|regname, reg|
         if(reg[:fields])
@@ -496,16 +484,29 @@ def generate_uc_cinclude(ucname, opts = {})
     already_printed = {}
     peripherals = eval(ucname)
     peripherals.each {|k, v|
-        # if(!already_printed[v[:struct_name]])
-        #     emit_c_struct(v)
-        #     already_printed[v[:struct_name]] = true
-        #     puts
-        # end
-        # emit_c_structdecl(v)
-        # puts
+        if(!already_printed[v[:struct_name]])
+            puts "\n//" + "*"*78
+            puts "// #{v[:name]} struct definition"
+            puts "//" + "*"*78
+            emit_c_struct(v)
+            already_printed[v[:struct_name]] = true
+            puts
+        end
+    
+        puts "\n//" + "*"*78
+        puts "// #{v[:name]} registers"
+        puts "//" + "*"*78
+        emit_c_structdecl(v)
+        puts
         print_regs(v)
         puts
+    }
+    peripherals.each {|k, v|
+        puts "\n//" + "*"*78
+        puts "// #{v[:name]} bitdefs"
+        puts "//" + "*"*78
         print_vals(v)
+        puts
     }
     puts ""
     puts "#endif // #{ucname}REGS_H"
