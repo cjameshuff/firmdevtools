@@ -33,37 +33,33 @@
 # :struct_name, the name of the peripheral type..."GPIO" as opposed to "GPIO1", for example.
 # :base, base address of the peripheral
 # :regs_by_name, a hash with the various registers belonging to the peripheral, keyed by name
-# :reglist, array of registers and register groupings
+# :reglist, array of registers and register groupings in memory order.
 #
 # Each register is a hash with the following pieces of information:
 # offset: offset from base address of peripheral
 # access: allowed access methods: :r, :w, :rw FIXME: needs to be made per-field
-# fields: a hash of bit ranges for each field of the register
-# vals: a hash of settings for the register, typically consisting of values for single
-#   fields to be bit-or'd together, but may also contain higher level settings that affect
-#   multiple fields. Some registers don't have any declared values...count registers, for
-#   example.
+# fields: a hash of bit subfields of the register, containing bit range and associated values.
+#   Fields must not overlap.
+# vals: a hash of settings for the register. May contain higher level settings that affect
+#   multiple fields, or just values for a register without any fields.
 #
-# For example:
+# For example, a SYSTICK peripheral, with CTRL, LOAD, VAL, and CALIB registers:
 # {
-#     name: "SYSTICK",
 #     base: 0xE0000000,
+#     name: "SYSTICK",
+#     struct_name: "SYSTICK",
+#     output: [:struct, :regs, :fields],
 #     regs_by_name: {
 #         CTRL: {
 #             offset: 0,
 #             access: :rw,
 #             fields: {
-#                 ENABLE: 0..0,
-#                 TICKINT: 1..1,
-#                 CLKSOURCE: 2..2,
-#                 COUNTFLAG: 16..16,
+#                 ENABLE: {bits: 0..0, vals: {ENABLE: (1<<0)}},
+#                 TICKINT: {bits: 1..1, vals: {TICKINT: (1<<1)}},
+#                 CLKSOURCE: {bits: 2..2, vals: {CLKSOURCE: (1<<2)}},
+#                 COUNTFLAG: {bits: 16..16, vals: {COUNTFLAG: (1<<16)}},
 #             },
-#             vals: {
-#                 ENABLE: (1<<0),
-#                 TICKINT: (1<<1),
-#                 CLKSOURCE: (1<<2),
-#                 COUNTFLAG: (1<<16),
-#             }
+#             vals: {...}
 #         },
 #         LOAD: {:offset: 4, access: rw, fields: {RELOAD: 16777215}},
 #         VAL: {:offset: 8, access: rw, fields: {VAL: 16777215}},
@@ -71,12 +67,6 @@
 #     },
 #     reglist: [...]
 # }
-
-# TODO:
-# Do something to handle registers that have different sets of fields in different modes
-
-# Hash:
-# fields: groups of bits
 
 
 ALL_PARTS = Dir.glob(File.dirname(__FILE__) + "/*").map{|e| File.basename(e, '.rb')}
@@ -92,18 +82,20 @@ class RegisterBuilder
         instance_eval &block
     end
     
+    # Define fields from bit range for a single unnamed field, or from a hash
+    # of bit ranges.
+    # Values are automatically generated for 1-bit fields from the field name.
     def quick_fields(qfields)
         # Hash: fname:bitnum, fname:bitrange
         if(qfields.kind_of? Range)
             # No fields, just a mask for the register as a whole
-            field(qfields)
+            field(:_, qfields)
         elsif(qfields.kind_of? Hash)
             qfields.each {|fieldname, fieldmask|
                 if(fieldmask.kind_of? Range)
-                    field(fieldmask, fieldname)
-                else
-                    field(fieldmask..fieldmask, fieldname)
-                    val(1 << fieldmask, fieldname)
+                    field(fieldname, fieldmask)
+                else# 1 bit field
+                    flag(fieldname, fieldmask)
                 end
             }
         end
@@ -112,47 +104,75 @@ class RegisterBuilder
     # Define mask and values for a 1-bit field
     # By default, defines a value with the same name as the field. Can optionally
     # override this, as well as defining a value for the bit not being set.
-    # The bit is specified in bitmask form (1<<bit) for consistency and clarity
-    def flag(bit, flagname, onvalname = nil, offvalname = nil)
-        field(bit..bit, flagname)
+    # The bit is specified by bit index.
+    def flag(flagname, bit, onvalname = nil, offvalname = nil)
+        field(flagname, bit..bit)
         if(onvalname)
-            val(1<<bit, onvalname)
+            vals(flagname, onvalname.to_sym => 1)
         else
-            val(1<<bit, flagname)
+            vals(flagname, flagname => 1)
         end
         if(offvalname)
-            val(0, offvalname)
+            vals(flagname, offvalname.to_sym => 0)
         end
     end
     
-    # def flags(flag_hash)
-    #     flag_hash.each{|k,v| flag(v, k)}
-    # end
+    def flags(flag_hash)
+        flag_hash.each{|k,v| flag(k, v)}
+    end
     
-    # It often does not make sense to give a mask a name separate from that of
+    # rebuild hash to ensure fields are sorted by position
+    def resort_fields()
+        @register[:fields] = Hash[
+            @register[:fields].to_a.sort{|a, b| a[1][:bits].begin <=> b[1][:bits].begin}
+        ]
+    end
+    
+    # Define a field of a register, a contiguous range of bits grouped for a specific
+    # function.
+    # It often does not make sense to give a field a name separate from that of
     # the register itself, for instance in GPIO data or direction registers,
-    # timer/counter value registers, etc. One mask per register may be unnamed.
-    def field(bitrange, fieldname = nil)
-        if(!@register[:fields])
-            @register[:fields] = {}
+    # timer/counter value registers, etc. One field per register may be unnamed,
+    # use the symbol :_ for these fields.
+    # 
+    # field(fieldname, bitrange)
+    # field(fieldname, values)
+    # field(fieldname, bitrange, values)
+    def field(fieldname, x, y = nil)
+        fieldname = fieldname.to_sym
+        if(!@register[:fields][fieldname])
+            @register[:fields][fieldname] = {bits: nil, vals: {}}
         end
-        # TODO: check for existing unnamed mask
-        @register[:fields][(fieldname)? fieldname.to_sym : :_] = bitrange
-        @register[:fields] = Hash[@register[:fields].to_a.sort{|a, b| a[1].begin <=> b[1].begin}]
+        val_hash = y
+        if(x.kind_of? Range)
+            @register[:fields][fieldname][:bits] = x
+            resort_fields()
+        elsif(x.kind_of? Numeric)
+            @register[:fields][fieldname][:bits] = x..x
+            resort_fields()
+        else
+            val_hash = x
+        end
+        
+        if(val_hash)
+            val_hash.each {|valname, val|
+                valname = valname.to_sym
+                @register[:fields][fieldname][:vals][valname] = val
+            }
+        end
     end
     
-    def val(val, valname)
-        if(!@register[:vals])
-            @register[:vals] = {}
+    # Specify values for a register or register field.
+    # Use a fieldname of :_ to specify values for the register as a whole.
+    # Values are specified and stored as integer value of field, and must be
+    # shifted properly before used in direct register writes.
+    def vals(fieldname, val_hash)
+        fieldname = fieldname.to_sym
+        if(fieldname == :_)
+            val_hash.each {|valname, val| @register[:vals][valname.to_sym] = val}
+        else
+            field(fieldname, val_hash)
         end
-        @register[:vals][valname.to_sym] = val
-    end
-    
-    def vals(val_hash)
-        if(!@register[:vals])
-            @register[:vals] = {}
-        end
-        @register[:vals].merge!(val_hash)
     end
 end
 
@@ -160,10 +180,16 @@ end
 # The initialize() method takes the base address, a type/instance name (instance
 # names must be overridden later if distinct from the type name), and a block
 # containing the definition of the registers.
+#
 # The base address may be given as -1 instead of an actual address. This will
 # signal the code to not output registers, only masks and values, allowing for
 # generic definitions shared among multiple identical peripherals, such as the
 # various GPIO ports.
+#
+# Similarly, individual registers can be defined with access permissions of :none,
+# allowing bit definitions to be generated for multiple registers under a generic
+# name.
+#
 # Hash:
 # base: base address of peripheral
 # name: name of peripheral
@@ -201,8 +227,9 @@ class RegSetBuilder
             name: regname.to_sym,
             type: type,
             offset: offset,
-            access: (access)? access : :rw
-            # fields: {}
+            access: (access)? access : :rw,
+            fields: {},
+            vals: {}
         }
         @regs_by_name[regname.to_sym] = reg
         if(reg[:access] != :none)
@@ -283,8 +310,8 @@ def range_mask(r)
     (2 << r.end) - (1 << r.begin)
 end
 
-
-def print_bitfield(indent, reg, opts)
+# Emit a union of a bitfield and a flat register
+def emit_c_bitfield(indent, reg, opts)
     start = reg[:offset].begin
     size = (1 + reg[:offset].end - reg[:offset].begin)/4
     array_str = (size > 1)? "[#{size}]" : ""
@@ -294,11 +321,11 @@ def print_bitfield(indent, reg, opts)
     n = 0
     puts indent + "\tstruct {"
     reg[:fields].each {|name, f|
-        if(f.begin != n)
-            puts indent + "\t\t__PADDING  pad%d:%d;"%[n, f.begin - n]
+        if(f[:bits].begin != n)
+            puts indent + "\t\t__PADDING  pad%d:%d;"%[n, f[:bits].begin - n]
         end
-        puts indent + "\t\t#{FIELDTYPESTRS[reg[:access]]} %s:%d;"%[name.to_s, 1 + f.end - f.begin]
-        n = f.end + 1
+        puts indent + "\t\t#{FIELDTYPESTRS[reg[:access]]} %s:%d;"%[name.to_s, 1 + f[:bits].end - f[:bits].begin]
+        n = f[:bits].end + 1
     }
     if(n < 32)
         puts indent + "\t\t__PADDING pad%d:%d;"%[n, 32 - n]
@@ -307,7 +334,8 @@ def print_bitfield(indent, reg, opts)
     puts indent + "};" % [reg[:name].to_s, array_str]
 end
 
-def print_struct_members(indent, base, addr, regs, opts)
+# Emit members of a struct or union (such as a peripheral or subgroup of registers)
+def emit_c_struct_members(indent, base, addr, regs, opts)
     regs.each {|reg|
         start = reg[:offset].begin
         size = (1 + reg[:offset].end - reg[:offset].begin)/4
@@ -327,12 +355,12 @@ def print_struct_members(indent, base, addr, regs, opts)
         if(reg[:type] == :union)
             puts indent + "union {"
             reg[:reglist].each {|reg|
-                print_struct_members(indent + "\t", base, addr, [reg], opts)
+                emit_c_struct_members(indent + "\t", base, addr, [reg], opts)
             }
             puts indent + "};"
         elsif(reg[:type] == :struct)
             puts indent + "union {"
-            print_struct_members(indent + "\t", base, addr, reg[:reglist], opts)
+            emit_c_struct_members(indent + "\t", base, addr, reg[:reglist], opts)
             puts indent + "};"
         elsif(reg[:type] == :pad32)
             if(size > 1)
@@ -344,7 +372,7 @@ def print_struct_members(indent, base, addr, regs, opts)
             puts indent + "#{regtype} %s[%d]; // %04X" % [reg[:name].to_s, size, addr - base]
         else
             # if(opts[:bitfields])
-                print_bitfield(indent, reg, opts)
+                emit_c_bitfield(indent, reg, opts)
             # else
             #     puts indent + "#{regtype} %s; // %04X" % [reg[:name].to_s, addr - base]
             # end
@@ -353,7 +381,8 @@ def print_struct_members(indent, base, addr, regs, opts)
     }
 end
 
-def print_struct(periph, opts = {})
+# Emit C struct declaration and typedef for a peripheral. Name of type will be [STRUCT_NAME]_struct.
+def emit_c_struct(periph, opts = {})
     base = periph[:base]
     sname = periph[:struct_name]
     
@@ -362,11 +391,12 @@ def print_struct(periph, opts = {})
     puts "//" + "*"*78
     
     puts "typedef struct {"
-    print_struct_members("\t", base, base, periph[:reglist], opts)
+    emit_c_struct_members("\t", base, base, periph[:reglist], opts)
     puts "} %s_struct;" % [sname]
 end
 
-def print_structdecl(periph)
+# Emit C struct variable declaration for a peripheral.
+def emit_c_structdecl(periph)
     if(periph[:base] == -1)
         return # not a real peripheral, defined only to attach register fields/values
     end
@@ -375,6 +405,7 @@ def print_structdecl(periph)
     puts "#define %s  ((%s_struct *)0x%X)" % [pname, sname, periph[:base]]
 end
 
+# Emit declarations for direct register access, not as members of a struct.
 def print_regs(periph)
     if(periph[:base] == -1)
         return # not a real peripheral, defined only to attach register fields/values
@@ -390,15 +421,14 @@ def print_regs(periph)
     
     base = periph[:base]
     periph[:regs_by_name].each {|regname, reg|
-        if(reg[:access] == :none)
-            next # not a real register, defined only to attach register fields/values
+        if(reg[:access] != :none)
+            offset = reg[:offset]
+            puts "#define %s_%s  (*(uint32_t *)0x%X)" % [periph[:name], regname.to_s, (base + offset.begin)]
         end
-        
-        offset = reg[:offset]
-        puts "#define %s_%s  (*(uint32_t *)0x%X)" % [periph[:name], regname.to_s, (base + offset.begin)]
     }
 end
 
+# Emit definitions of masks and values for fields of each register
 def print_vals(periph)
     if(!periph[:output].include? :fields)
         return
@@ -410,20 +440,32 @@ def print_vals(periph)
     
     periph[:regs_by_name].each {|regname, reg|
         if(reg[:fields])
-            reg[:fields].each {|valname, val|
-                if(valname == :_)
-                    puts "#define %s_BITS  0x%X" % [regname.to_s, range_mask(val)]
-                    # puts "#define %s_%s_BITS  0x%X" % [periph[:name], regname.to_s, val]
+            reg[:fields].each {|fieldname, field|
+                if(fieldname == :_)
+                    puts "#define %s_MASK  0x%X" % [regname.to_s, range_mask(field[:bits])]
+                    # puts "#define %s_%s_MASK  0x%X" % [periph[:name], regname.to_s, val]
                 else
-                    puts "#define %s_%s_BITS  0x%X" % [regname.to_s, valname.to_s, range_mask(val)]
-                    # puts "#define %s_%s_%s_BITS  0x%X" % [periph[:name], regname.to_s, valname.to_s, val]
+                    puts "#define %s_%s_MASK  0x%X" % [regname.to_s, fieldname.to_s, range_mask(field[:bits])]
+                    # puts "#define %s_%s_%s_MASK  0x%X" % [periph[:name], regname.to_s, valname.to_s, val]
                 end
             }
+            puts ""
         else
             $stderr.puts "Incomplete definition for #{regname.to_s} in #{periph[:name]}"
         end
         
-        if(reg[:vals])
+        # Register field values
+        if(reg[:fields].length > 0)
+            reg[:fields].each {|fieldname, field|
+                field[:vals].each {|valname, val|
+                    puts "#define %s_%s  0x%X" % [regname.to_s, valname.to_s, val << field[:bits].begin]
+                }
+            }
+            puts ""
+        end
+        
+        # Register values
+        if(reg[:vals].length > 0)
             reg[:vals].each {|valname, val|
                 # puts "#define %s_%s_%s  0x%X" % [periph[:name], regname.to_s, valname.to_s, val]
                 puts "#define %s_%s  0x%X" % [regname.to_s, valname.to_s, val]
@@ -433,9 +475,12 @@ def print_vals(periph)
     }
 end
 
+# Generate a C include for a microcontroller, with peripherals in its memory space,
+# with complete struct access and bitfields by default.
 def generate_uc_cinclude(ucname, opts = {})
-    puts "#ifndef #{ucname.upcase}REGS_H"
-    puts "#define #{ucname.upcase}REGS_H"
+    ucname = ucname.upcase
+    puts "#ifndef #{ucname}REGS_H"
+    puts "#define #{ucname}REGS_H"
     puts ""
     puts "#define __R_REG32  volatile const uint32_t"
     puts "#define __W_REG32  volatile uint32_t"
@@ -451,19 +496,18 @@ def generate_uc_cinclude(ucname, opts = {})
     already_printed = {}
     peripherals = eval(ucname)
     peripherals.each {|k, v|
-        if(!already_printed[v[:struct_name]])
-            print_struct(v)
-            already_printed[v[:struct_name]] = true
-            puts
-        end
-        print_structdecl(v)
-    }
-    peripherals.each {|k, v|
+        # if(!already_printed[v[:struct_name]])
+        #     emit_c_struct(v)
+        #     already_printed[v[:struct_name]] = true
+        #     puts
+        # end
+        # emit_c_structdecl(v)
+        # puts
         print_regs(v)
         puts
         print_vals(v)
     }
     puts ""
-    puts "#endif // #{ucname.upcase}REGS_H"
+    puts "#endif // #{ucname}REGS_H"
     puts ""
 end
