@@ -24,6 +24,14 @@ require 'regdefs/regdefs'
 
 module RegDefs
 
+ALL_PARTS = Dir.glob(File.dirname(__FILE__) + "/*").map{|e| File.basename(e, '.rb')}
+ALL_PARTS.delete('regdefs')
+ALL_PARTS.delete('regtools')
+
+REGSIZES = {reg8: 1, reg16: 2, reg32: 4}
+REGTYPESTRS32 = {r: '__R_REG32 ', w: '__W_REG32 ', rw: '__RW_REG32'}
+FIELDTYPESTRS = {r: '__R_FIELD ', w: '__W_FIELD ', rw: '__RW_FIELD'}
+
 def self.range_mask(r)
     (2 << r.end) - (1 << r.begin)
 end
