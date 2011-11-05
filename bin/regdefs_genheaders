@@ -23,6 +23,7 @@
 #*******************************************************************************
 
 require 'regdefs/regdefs'
+require 'regdefs/regtools'
 
 if(ARGV.length < 1)
     puts "Usage:"
@@ -34,4 +35,4 @@ end
 
 require "regdefs/#{ARGV[0].downcase}"
 
-generate_uc_cinclude(ARGV[0])
+RegDefs::generate_uc_cincludes(ARGV[0])
