@@ -105,7 +105,8 @@ else
 end
 
 if(os == 'mac')
-    `diskutil eject '#{dev_dir}'`
+    # `diskutil eject '#{dev_dir}'`
+    `diskutil unmountDisk '#{dev_dir}'`
     puts "Done"
 elsif(os == 'unix')
     # umount...
