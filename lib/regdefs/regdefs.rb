@@ -69,6 +69,7 @@
 # }
 
 module RegDefs
+REGSIZES = {reg8: 1, reg16: 2, reg32: 4}
 
 class RegisterBuilder
     def initialize(periph, regname, &block)
